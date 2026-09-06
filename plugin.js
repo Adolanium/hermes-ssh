@@ -3,6 +3,196 @@ import { useEffect, useRef, useState } from "react";
 import { jsx, jsxs } from "react/jsx-runtime";
 
 const ID = "hermes-ssh";
+const VERSION = "0.3.1";
+// Public verification key only. The release signing key never ships to users.
+const UPDATE_KEY = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEdDcg2pf4qQg4y89ZLfoIhfJqyKP+bJMA0Q0YVDK0VAbAgyVi5CaodDuUgibOqTx1zQg9xrXdzYbCvpgMjIFBCw==";
+const UPDATE_REPO = "Adolanium/hermes-ssh";
+const UPDATE_LIMIT = 500_000;
+const updateState = sdk.atom({ busy: false, message: "", error: "", backup: null });
+const UPDATE_LOCK = Symbol.for("hermes-ssh.update-lock");
+
+function updatePatch(value) {
+  if (!disposed) updateState.set({ ...updateState.get(), ...value });
+}
+function versionParts(version) {
+  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version))
+    throw new Error("The release has an invalid version.");
+  const parts = version.split(".").map(Number);
+  if (!parts.every(Number.isSafeInteger)) throw new Error("Invalid release version.");
+  return parts;
+}
+function newerVersion(next, current) {
+  const a = versionParts(next), b = versionParts(current);
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i];
+  return false;
+}
+function decode64(value) {
+  if (typeof value !== "string" || value.length > 12_000)
+    throw new Error("Invalid update signature.");
+  return Uint8Array.from(atob(value), (c) => c.charCodeAt(0));
+}
+async function digest(text) {
+  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))),
+    (b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function verifyRelease(release) {
+  if (release.draft || release.prerelease) throw new Error("This is not a stable release.");
+  const match = String(release.body || "").match(/```hermes-ssh-update\s*\n([\s\S]*?)\n```/);
+  if (!match) throw new Error("This release has no signed update. The installed version is unchanged.");
+  const envelope = JSON.parse(match[1]);
+  const payload = decode64(envelope.payload);
+  const key = await crypto.subtle.importKey("spki", decode64(UPDATE_KEY),
+    { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+  if (!await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key,
+    decode64(envelope.signature), payload))
+    throw new Error("The update signature is invalid. Nothing was installed.");
+  const info = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload));
+  versionParts(info.version);
+  if (info.schema !== 1 || info.plugin !== ID || release.tag_name !== `v${info.version}` ||
+      !/^[a-f0-9]{40}$/.test(info.commit) || !/^[a-f0-9]{64}$/.test(info.sha256) ||
+      !Number.isInteger(info.bytes) || info.bytes < 1 || info.bytes > UPDATE_LIMIT)
+    throw new Error("The signed release metadata is invalid.");
+  return info;
+}
+async function fetchUpdateText(url, limit) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const response = await fetch(url, { signal: controller.signal, credentials: "omit",
+      referrerPolicy: "no-referrer", cache: "no-store", redirect: "error" });
+    if (response.status === 404) {
+      const error = new Error("The release file is unavailable on GitHub. Try again later.");
+      error.status = 404;
+      throw error;
+    }
+    if (response.status === 403 || response.status === 429)
+      throw new Error("GitHub is limiting update checks. Try again later.");
+    if (!response.ok) throw new Error(`Update download failed (${response.status}). Try again later.`);
+    if (Number(response.headers.get("content-length")) > limit || !response.body)
+      throw new Error("The update download is too large or empty.");
+    const reader = response.body.getReader();
+    const chunks = [];
+    let length = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.length;
+      if (length > limit) { await reader.cancel(); throw new Error("The update download is too large."); }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (error) {
+    if (error.name === "AbortError") throw new Error("Update check timed out. Try again.");
+    throw error;
+  } finally { clearTimeout(timeout); }
+}
+function updateDesktop() {
+  const desktop = globalThis.window?.hermesDesktop;
+  if (!desktop?.desktopPluginsRoot || !desktop?.readFileText || !desktop?.writeTextFile || !desktop?.renamePath)
+    throw new Error("Open this plugin in Hermes Desktop to update it. This Desktop must support local plugin files.");
+  return desktop;
+}
+async function readUpdateFile(desktop, path) {
+  const result = await desktop.readFileText(path);
+  if (result.truncated || typeof result.text !== "string" || new TextEncoder().encode(result.text).length > UPDATE_LIMIT)
+    throw new Error("The plugin file could not be read completely.");
+  return result.text;
+}
+async function updateLocation(desktop) {
+  const root = await desktop.desktopPluginsRoot();
+  if (typeof root !== "string" || !root.trim()) throw new Error("Desktop's local plugin folder is unavailable.");
+  return root.replace(/[\\/]+$/, "") + "/" + ID;
+}
+function backupKey(dir) { return "updater:backup:" + dir; }
+function validBackup(record) {
+  return record && /^plugin\.backup-[a-f0-9-]{36}\.js$/.test(record.name) && /^[a-f0-9]{64}$/.test(record.sha256);
+}
+async function loadUpdateBackup() {
+  try {
+    const dir = await updateLocation(updateDesktop());
+    const record = await context?.storage.get(backupKey(dir), null);
+    updatePatch({ backup: validBackup(record) ? record : null });
+  } catch { /* SSH remains usable on Desktop versions without updater APIs. */ }
+}
+// Only Electron-local filesystem APIs are used here, never shell.exec or an SSH profile.
+// Stage and verify first. Renaming preserves the old file if the final step fails.
+async function replacePlugin(desktop, dir, before, next, storage) {
+  const file = dir + "/plugin.js";
+  const stage = "plugin.staged-" + crypto.randomUUID() + ".js";
+  const backup = { name: "plugin.backup-" + crypto.randomUUID() + ".js", sha256: await digest(before) };
+  await desktop.writeTextFile(dir + "/" + stage, next);
+  if (await readUpdateFile(desktop, dir + "/" + stage) !== next)
+    throw new Error("The staged update could not be verified. The installed version is unchanged.");
+  if (disposed || state.get().busy || state.get().panel || await updateLocation(desktop) !== dir || await readUpdateFile(desktop, file) !== before)
+    throw new Error("The Desktop profile or installed plugin changed. Reload Desktop and check again.");
+  const previousRecord = await storage.get(backupKey(dir), null);
+  let moved = false;
+  try {
+    await storage.set(backupKey(dir), backup);
+    await desktop.renamePath(file, backup.name);
+    moved = true;
+    await desktop.renamePath(dir + "/" + stage, "plugin.js");
+  } catch (error) {
+    try { if (moved) await desktop.renamePath(dir + "/" + backup.name, "plugin.js"); }
+    catch { throw new Error(`Update failed. Restore ${backup.name} to plugin.js in ${dir}, then reload Desktop.`); }
+    await storage.set(backupKey(dir), previousRecord);
+    throw new Error("Update failed. The previous plugin was restored. " + error.message);
+  }
+  return backup;
+}
+async function runUpdate(restore = false) {
+  if (globalThis[UPDATE_LOCK] || state.get().busy || state.get().panel) return;
+  globalThis[UPDATE_LOCK] = true;
+  updatePatch({ busy: true, error: "", message: restore ? "Restoring the previous version…" : "Checking for updates…" });
+  try {
+    const desktop = updateDesktop();
+    const dir = await updateLocation(desktop);
+    const storage = context.storage;
+    const before = await readUpdateFile(desktop, dir + "/plugin.js");
+    // A renamed or duplicate installation must never overwrite another copy.
+    if (!before.includes(`const VERSION = "${VERSION}";`) || !before.includes(`const UPDATE_KEY = "${UPDATE_KEY}";`))
+      throw new Error("This isn't the loaded plugin's installation. Install it under hermes-ssh/plugin.js and reload Desktop.");
+    let next, message;
+    if (restore) {
+      const backup = await storage.get(backupKey(dir), null);
+      if (!validBackup(backup)) throw new Error("No previous version is available.");
+      next = await readUpdateFile(desktop, dir + "/" + backup.name);
+      if (await digest(next) !== backup.sha256) throw new Error("The backup has changed. It was not restored.");
+      message = "Previous version restored. Reload desktop plugins if the page hasn't refreshed.";
+    } else {
+      let release;
+      try {
+        release = JSON.parse(await fetchUpdateText(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, 100_000));
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        updatePatch({ message: `No update is published yet. You're still on v${VERSION}.` });
+        return;
+      }
+      const info = await verifyRelease(release);
+      if (!newerVersion(info.version, VERSION)) {
+        updatePatch({ message: `You're up to date. Hermes SSH v${VERSION}.` });
+        return;
+      }
+      updatePatch({ message: `Downloading v${info.version}…` });
+      next = await fetchUpdateText(`https://raw.githubusercontent.com/${UPDATE_REPO}/${info.commit}/plugin.js`, UPDATE_LIMIT);
+      if (new TextEncoder().encode(next).length !== info.bytes || await digest(next) !== info.sha256 ||
+          !next.includes(`const VERSION = "${info.version}";`) || !next.includes(`const ID = "${ID}";`))
+        throw new Error("The update does not match the signed release. Nothing was installed.");
+      message = `Updated to v${info.version}. Reload desktop plugins if the page hasn't refreshed.`;
+    }
+    updatePatch({ message: "Saving the previous version and applying the update…" });
+    const backup = await replacePlugin(desktop, dir, before, next, storage);
+    updatePatch({ backup, message });
+  } catch (error) {
+    updatePatch({ error: error.message || "Couldn't reach GitHub. Check your connection and try again.", message: "" });
+  } finally {
+    globalThis[UPDATE_LOCK] = false;
+    updatePatch({ busy: false });
+  }
+}
 const ROUTE = "/ssh-connections";
 const host = sdk.host;
 const state = sdk.atom({
@@ -392,6 +582,7 @@ const CSS = `
 .hssh-panel{border:1px solid var(--ssh-line);border-radius:14px;overflow:hidden;animation:ssh-panel .22s cubic-bezier(.16,1,.3,1)}@keyframes ssh-panel{from{clip-path:inset(0 0 5% 0);opacity:.5}to{clip-path:inset(0);opacity:1}}.hssh-panel-head{padding:22px 24px 18px;display:flex;justify-content:space-between;gap:12px;align-items:flex-start;background:var(--ssh-raised)}.hssh-panel-head h2{font-size:19px;font-weight:600;letter-spacing:-.025em;margin:0}.hssh-panel-head p{font-size:12px;color:var(--ssh-muted);margin:4px 0 0}.hssh-panel-body{padding:24px}.hssh-steps{display:flex;gap:18px;align-items:center;margin:0 0 25px;font-size:12px;color:var(--ssh-muted)}.hssh-step{display:flex;gap:6px;align-items:center}.hssh-step.current{color:var(--ssh-text);font-weight:600}.hssh-step .hssh-icon{width:14px;height:14px}.hssh-form{display:flex;flex-direction:column;gap:18px}.hssh-field{display:flex;flex-direction:column;gap:6px;min-width:0}.hssh-field>span{font-weight:550;font-size:12px}.hssh-field input,.hssh-field select{width:100%;min-height:39px;border:1px solid var(--ssh-line);border-radius:7px;padding:8px 11px;background:var(--ssh-bg);color:var(--ssh-text);min-width:0}.hssh-field input::placeholder{color:var(--ssh-muted);opacity:.85}.hssh-field small{font-size:11px;color:var(--ssh-muted)}.hssh-fields{display:grid;grid-template-columns:1fr 90px;gap:12px}.hssh-input-row{display:flex;gap:8px;align-items:center}.hssh-input-row .hssh-field{flex:1}.hssh-panel-foot{margin-top:25px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--ssh-line);padding-top:20px}.hssh-inline-link{border:0;background:none;padding:0;text-decoration:underline;text-underline-offset:3px;color:var(--ssh-muted);font-size:12px}.hssh-key-actions{display:flex;flex-wrap:wrap;gap:12px}.hssh-key-copy{background:var(--ssh-raised);border-radius:8px;padding:12px;overflow-wrap:anywhere;font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;margin:12px 0}.hssh-fingerprint{font:11px/1.8 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere;padding:13px 0;border-bottom:1px solid var(--ssh-line)}.hssh-fingerprint span{display:block;color:var(--ssh-muted);font:11px/1.8 inherit}.hssh-check{display:flex;gap:9px;align-items:flex-start;font-size:12px;cursor:pointer;margin-top:16px}.hssh-check input{margin-top:4px;accent-color:var(--ui-accent)}.hssh-success{display:flex;align-items:center;gap:12px;margin-bottom:20px}.hssh-success .hssh-icon{width:26px;height:26px;color:var(--ui-green)}.hssh-success h3{font-size:17px;font-weight:550;margin:0}.hssh-success p{margin:2px 0 0;color:var(--ssh-muted);font-size:12px}.hssh-details{margin:0}.hssh-details>div{display:flex;justify-content:space-between;gap:18px;border-bottom:1px solid var(--ssh-line);padding:11px 0}.hssh-details dt{font-size:12px;color:var(--ssh-muted)}.hssh-details dd{margin:0;font-size:12px;text-align:right;overflow-wrap:anywhere}.hssh-remove{margin-top:18px;padding-top:17px;border-top:1px solid var(--ssh-line)}.hssh-remove p{font-size:12px;color:var(--ssh-muted)}.hssh-loading{padding:80px 0;color:var(--ssh-muted);text-align:center}.hssh-origin{font-size:11px;color:var(--ssh-muted)}
 @container(max-width:850px){.hssh-main{padding:32px 25px}.hssh-grid.editing{grid-template-columns:1fr}.hssh-grid.editing>section:first-child{display:none}.hssh-panel{max-width:580px;width:100%;justify-self:center}.hssh-heading{gap:12px}.hssh h1{font-size:27px}}
 @container(max-width:480px){.hssh-main{padding:24px 18px}.hssh-heading{align-items:flex-start}.hssh-heading>.hssh-btn{padding:8px 10px}.hssh-subtitle{font-size:12px}.hssh-footer{flex-direction:column;align-items:flex-start;gap:9px}.hssh-machine{flex-wrap:wrap}.hssh-machine-actions{margin-left:59px}.hssh-panel-head,.hssh-panel-body{padding:18px}.hssh-empty{min-height:300px}.hssh-steps{gap:12px}}
+.hssh-updates{border-top:1px solid var(--ssh-line);margin-top:28px;padding-top:20px}.hssh-update-row{display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap}.hssh-update-row strong{font-size:12px;font-weight:600}.hssh-update-row p,.hssh-update-status{font-size:12px;color:var(--ssh-muted);margin:4px 0;overflow-wrap:anywhere}.hssh-update-status{margin-top:12px}.hssh-update-status.error{color:var(--ui-red)}.hssh-updates>.hssh-btn{margin-top:10px}
 @media(prefers-reduced-motion:reduce){.hssh *{animation:none!important;transition:none!important}}
 `;
 
@@ -1062,7 +1253,7 @@ function Page() {
                   jsx("h1", { children: "Connections" }),
                   jsx("p", {
                     className: "hssh-subtitle",
-                    children: "Familiar tools. A different machine.",
+                    children: "Your machines. One place to work.",
                   }),
                 ],
               }),
@@ -1166,7 +1357,43 @@ function Page() {
             children:
               "Requires SSH access and Bash on the remote machine. Browsers and other integrations keep their current location.",
           }),
+          jsx(UpdateControls, { disabled: !!s.busy || s.panel }),
         ],
+      }),
+    ],
+  });
+}
+
+function UpdateControls({ disabled = false }) {
+  const update = sdk.useValue(updateState);
+  return jsxs("section", {
+    className: "hssh-updates",
+    "aria-label": "Plugin updates",
+    children: [
+      jsxs("div", {
+        className: "hssh-update-row",
+        children: [
+          jsxs("div", {
+            children: [
+              jsx("strong", { children: `Hermes SSH v${VERSION}` }),
+              jsx("p", { children: disabled ? "Finish machine setup before updating." : "Checks GitHub and installs a verified update when available." }),
+            ],
+          }),
+          jsx(Button, {
+            icon: "refresh", disabled: disabled || update.busy,
+            onClick: () => runUpdate(),
+            children: update.busy ? "Please wait…" : "Check for updates",
+          }),
+        ],
+      }),
+      (update.message || update.error) && jsx("p", {
+        className: `hssh-update-status${update.error ? " error" : ""}`,
+        role: update.error ? "alert" : "status",
+        children: update.error || update.message,
+      }),
+      update.backup && jsx(Button, {
+        variant: "quiet", disabled: disabled || update.busy,
+        onClick: () => runUpdate(true), children: "Restore previous version",
       }),
     ],
   });
@@ -1179,6 +1406,7 @@ export default {
   register(ctx) {
     context = ctx;
     disposed = false;
+    loadUpdateBackup();
     platformPromise = null;
     const profile = host.state.profile?.get() || "default";
     const connection = host.state.connectionId?.get();
@@ -1245,6 +1473,15 @@ export default {
   },
 };
 export const __test = {
+  VERSION,
+  UPDATE_KEY,
+  updateState,
+  newerVersion,
+  verifyRelease,
+  fetchUpdateText,
+  replacePlugin,
+  runUpdate,
+  UpdateControls,
   quote,
   validateMachine,
   testConnection,

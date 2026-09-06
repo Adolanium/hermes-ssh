@@ -10,7 +10,7 @@
 
 Save your Raspberry Pi, development server, or build machine in Hermes Desktop. Open its workspace with a click or `/ssh machine-name`, then ask Hermes to work with its terminal and files.
 
-**Built for [Hermes Desktop](https://github.com/NousResearch/hermes-agent) · Community plugin · v0.2.0**
+**Built for [Hermes Desktop](https://github.com/NousResearch/hermes-agent) · Community plugin · v0.3.1**
 
 [What it does](#your-machines-inside-hermes) · [Install](#install) · [Connect a machine](#connect-a-machine) · [Authentication and data](#authentication-and-data)
 
@@ -61,6 +61,60 @@ Use your actual Hermes home if it differs. A named Desktop profile uses its own 
 Open Hermes Desktop and choose **SSH** in the sidebar. If it is missing, open the command palette and choose **Reload desktop plugins**, or restart Desktop. Restarting also clears an older copy that an open page may still be using.
 
 Only `plugin.js` is required. This README is the installation and usage guide.
+
+## Updates
+
+Choose **Check for updates** at the bottom of Connections. It checks the latest stable GitHub release and automatically installs a newer, verified version. Nothing is downloaded in the background. Finish any open machine setup before updating.
+
+The plugin checks a release signature against its built-in public key, then checks the downloaded file's SHA-256 hash and size before replacing anything. Downloads come from this repository at the exact commit named in the signed release. Unsigned releases, altered files, and automatic downgrades are rejected. This verifies the publisher and file integrity; it does not guarantee that a release has no bugs.
+
+Desktop normally reloads the plugin after replacement. If needed, use **Reload desktop plugins** or restart Desktop. Saved machines and SSH keys are preserved. The update always goes into the local Desktop profile's plugin folder, even while working over SSH.
+
+**Restore previous version** restores the backup from the last replacement. Backups are also kept beside `plugin.js` as `plugin.backup-<id>.js`. If a broken version prevents the page from opening, close Desktop, move the broken `plugin.js` aside, rename the chosen backup to `plugin.js`, and reopen Desktop. A failed final rename triggers an immediate attempt to restore the old file. Desktop's file API does not provide an atomic overwrite, so a crash between renames can require this manual recovery.
+
+Updates require Desktop's local file APIs and access to GitHub. No extra Python, updater service, Git installation, or backend modification is needed for users. Older copies without this updater need one manual installation of v0.3.0 or later. If there is no signed release yet, the check leaves the installed copy alone.
+
+<details>
+<summary>Publishing a signed update</summary>
+
+Only maintainers need Node.js and Git for these steps. The repository remains two files. Release metadata lives in the GitHub release description.
+
+1. Update `VERSION` in `plugin.js` and this README, test, commit, and push. Use a stable `major.minor.patch` version.
+2. Keep the ECDSA P-256 private signing key outside the repository. Set `SSH_RELEASE_KEY` to its PEM path if it is not at `~/.hermes-ssh-release/signing-key.pem`. Back it up securely. Never upload it or put it in the plugin. Existing installations trust the corresponding `UPDATE_KEY`; replacing that key requires a release signed by the old key or a manual reinstall.
+3. Save the following publisher script **outside the repository**, for example as `sign-release.mjs`. Run `node /path/to/sign-release.mjs FULL_COMMIT_SHA` from the repository. It creates `hermes-ssh-release-notes.md` in your system temporary directory and prints its location. It checks that the signing key matches the public key in the committed plugin.
+
+```js
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
+
+const commit = process.argv[2];
+if (!/^[a-f0-9]{40}$/.test(commit || "")) throw new Error("Use a full commit SHA.");
+const source = execFileSync("git", ["show", `${commit}:plugin.js`]);
+const code = source.toString("utf8");
+const version = code.match(/const VERSION = "([0-9]+\.[0-9]+\.[0-9]+)";/)?.[1];
+const pinned = code.match(/const UPDATE_KEY = "([^"]+)";/)?.[1];
+const key = fs.readFileSync(process.env.SSH_RELEASE_KEY ||
+  path.join(os.homedir(), ".hermes-ssh-release", "signing-key.pem"));
+const publicKey = crypto.createPublicKey(key).export({ type: "spki", format: "der" }).toString("base64");
+if (!version || pinned !== publicKey) throw new Error("Version missing or signing key does not match.");
+const payload = Buffer.from(JSON.stringify({ schema: 1, plugin: "hermes-ssh", version,
+  commit, sha256: crypto.createHash("sha256").update(source).digest("hex"), bytes: source.length }));
+const signature = crypto.sign("sha256", payload, { key, dsaEncoding: "ieee-p1363" });
+const envelope = { payload: payload.toString("base64"), signature: signature.toString("base64") };
+const notes = `Hermes SSH v${version}\n\n\`\`\`hermes-ssh-update\n${JSON.stringify(envelope)}\n\`\`\`\n`;
+const output = path.join(os.tmpdir(), "hermes-ssh-release-notes.md");
+fs.writeFileSync(output, notes);
+console.log(output);
+```
+
+4. Add release notes above the signed block, without changing the block. Publish a stable GitHub release tagged `v<VERSION>`, targeting the same commit, and use that file as its description. For example, `gh release create v0.3.0 --repo Adolanium/hermes-ssh --target FULL_COMMIT_SHA --notes-file /path/to/hermes-ssh-release-notes.md`. Drafts and prereleases are not offered to users.
+
+The release signature covers the version, commit, hash, size, and plugin identity. The private key is needed only for publishing. Do not sign an unreviewed commit. For future updates, preserve the `VERSION`, `ID`, and `UPDATE_KEY` declarations used by the publisher and updater.
+
+</details>
 
 ## Connect a machine
 
