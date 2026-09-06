@@ -1,5 +1,9 @@
 <div align="center">
 
+<a href="https://github.com/NousResearch/hermes-agent">
+  <img src="https://github.com/user-attachments/assets/ac2f5702-c842-4b2e-9340-737481fa0ece" width="96" height="96" alt="Nous Research Hermes mark" />
+</a>
+
 # Hermes SSH
 
 ### Pick a machine. Give Hermes a task.
