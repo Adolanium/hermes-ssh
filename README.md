@@ -10,7 +10,7 @@
 
 Save your Raspberry Pi, development server, or build machine in Hermes Desktop. Open its workspace with a click or `/ssh machine-name`, then ask Hermes to work with its terminal and files.
 
-**Built for [Hermes Desktop](https://github.com/NousResearch/hermes-agent) · Community plugin · v0.3.2**
+**Built for [Hermes Desktop](https://github.com/NousResearch/hermes-agent) · Community plugin · v0.3.3**
 
 [What it does](#your-machines-inside-hermes) · [Install](#install) · [Connect a machine](#connect-a-machine) · [Authentication and data](#authentication-and-data)
 
@@ -70,7 +70,7 @@ The plugin checks a release signature against its built-in public key, then chec
 
 Desktop normally reloads the plugin after replacement. If needed, use **Reload desktop plugins** or restart Desktop. Saved machines and SSH keys are preserved. The update always goes into the local Desktop profile's plugin folder, even while working over SSH.
 
-**Restore previous version** restores the backup from the last replacement. Backups are also kept beside `plugin.js` as `plugin.backup-<id>.js`. If a broken version prevents the page from opening, close Desktop, move the broken `plugin.js` aside, rename the chosen backup to `plugin.js`, and reopen Desktop. A failed final rename triggers an immediate attempt to restore the old file. Desktop's file API does not provide an atomic overwrite, so a crash between renames can require this manual recovery.
+**Restore previous version** checks the backup from the last replacement and asks for confirmation. Choose **Restore now** to replace the plugin, or **Cancel** to leave it unchanged. Backups are also kept beside `plugin.js` as `plugin.backup-<id>.js`. If a broken version prevents the page from opening, close Desktop, move the broken `plugin.js` aside, rename the chosen backup to `plugin.js`, and reopen Desktop. A failed final rename triggers an immediate attempt to restore the old file. Desktop's file API does not provide an atomic overwrite, so a crash between renames can require this manual recovery.
 
 Updates require Desktop's local file APIs and access to GitHub. No extra Python, updater service, Git installation, or backend modification is needed for users. Older copies without this updater need one manual installation of v0.3.0 or later. If there is no signed release yet, the check leaves the installed copy alone.
 

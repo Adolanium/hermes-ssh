@@ -3,12 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { jsx, jsxs } from "react/jsx-runtime";
 
 const ID = "hermes-ssh";
-const VERSION = "0.3.2";
+const VERSION = "0.3.3";
 // Public verification key only. The release signing key never ships to users.
 const UPDATE_KEY = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEdDcg2pf4qQg4y89ZLfoIhfJqyKP+bJMA0Q0YVDK0VAbAgyVi5CaodDuUgibOqTx1zQg9xrXdzYbCvpgMjIFBCw==";
 const UPDATE_REPO = "Adolanium/hermes-ssh";
 const UPDATE_LIMIT = 500_000;
-const updateState = sdk.atom({ busy: false, message: "", error: "", backup: null, available: null });
+const updateState = sdk.atom({ busy: false, message: "", error: "", backup: null, available: null, restoreAvailable: null });
 const UPDATE_LOCK = Symbol.for("hermes-ssh.update-lock");
 
 function updatePatch(value) {
@@ -144,15 +144,17 @@ async function replacePlugin(desktop, dir, before, next, storage) {
   return backup;
 }
 function dismissUpdate() {
-  if (!updateState.get().busy) updatePatch({ available: null, message: "", error: "" });
+  if (!updateState.get().busy) updatePatch({ available: null, restoreAvailable: null, message: "", error: "" });
 }
 async function runUpdate(action = "check") {
   if (globalThis[UPDATE_LOCK] || state.get().busy || state.get().panel) return;
-  if (!["check", "install", "restore"].includes(action)) return;
+  if (!["check", "install", "restore", "restore-confirm"].includes(action)) return;
   const offered = updateState.get().available;
+  const restoreOffered = updateState.get().restoreAvailable;
   if (action === "install" && !offered) return;
+  if (action === "restore-confirm" && !restoreOffered) return;
   globalThis[UPDATE_LOCK] = true;
-  updatePatch({ busy: true, error: "", available: null, message: action === "restore" ? "Restoring the previous version…" : action === "install" ? "Verifying the selected update…" : "Checking for updates…" });
+  updatePatch({ busy: true, error: "", available: null, restoreAvailable: null, message: action === "restore-confirm" ? "Restoring the previous version…" : action === "restore" ? "Checking the backup…" : action === "install" ? "Verifying the selected update…" : "Checking for updates…" });
   try {
     const desktop = updateDesktop();
     const dir = await updateLocation(desktop);
@@ -162,11 +164,21 @@ async function runUpdate(action = "check") {
     if (!before.includes(`const VERSION = "${VERSION}";`) || !before.includes(`const UPDATE_KEY = "${UPDATE_KEY}";`))
       throw new Error("This isn't the loaded plugin's installation. Install it under hermes-ssh/plugin.js and reload Desktop.");
     let next, message;
-    if (action === "restore") {
+    if (action === "restore" || action === "restore-confirm") {
       const backup = await storage.get(backupKey(dir), null);
       if (!validBackup(backup)) throw new Error("No previous version is available.");
+      if (action === "restore-confirm" && (restoreOffered.dir !== dir ||
+          restoreOffered.sha256 !== await digest(before) ||
+          restoreOffered.backup.name !== backup.name || restoreOffered.backup.sha256 !== backup.sha256))
+        throw new Error("The installation or backup changed. Choose Restore previous version again.");
       next = await readUpdateFile(desktop, dir + "/" + backup.name);
       if (await digest(next) !== backup.sha256) throw new Error("The backup has changed. It was not restored.");
+      if (action === "restore") {
+        const version = next.match(/const VERSION = "([0-9]+\.[0-9]+\.[0-9]+)";/)?.[1];
+        updatePatch({ restoreAvailable: { dir, sha256: await digest(before), backup: { ...backup } },
+          message: `Restore ${version ? "Hermes SSH v" + version : "the previous version"}? This replaces the current plugin. Saved machines and SSH keys are preserved.` });
+        return;
+      }
       message = "Previous version restored. Reload desktop plugins if the page hasn't refreshed.";
     } else {
       let release = offered?.release;
@@ -1418,7 +1430,18 @@ function UpdateControls({ disabled = false }) {
             onClick: dismissUpdate, children: "Later" }),
         ],
       }),
-      update.backup && jsx(Button, {
+      update.restoreAvailable && jsxs("div", {
+        className: "hssh-key-actions",
+        role: "group",
+        "aria-label": "Confirm restore",
+        children: [
+          jsx(Button, { variant: "primary", disabled: disabled || update.busy,
+            onClick: () => runUpdate("restore-confirm"), children: "Restore now" }),
+          jsx(Button, { variant: "quiet", disabled: update.busy,
+            onClick: dismissUpdate, children: "Cancel" }),
+        ],
+      }),
+      update.backup && !update.restoreAvailable && jsx(Button, {
         variant: "quiet", disabled: disabled || update.busy,
         onClick: () => runUpdate("restore"), children: "Restore previous version",
       }),
