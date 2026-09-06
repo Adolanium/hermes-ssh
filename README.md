@@ -10,7 +10,7 @@
 
 Save your Raspberry Pi, development server, or build machine in Hermes Desktop. Open its workspace with a click or `/ssh machine-name`, then ask Hermes to work with its terminal and files.
 
-**Built for [Hermes Desktop](https://github.com/NousResearch/hermes-agent) · Community plugin · v0.3.1**
+**Built for [Hermes Desktop](https://github.com/NousResearch/hermes-agent) · Community plugin · v0.3.2**
 
 [What it does](#your-machines-inside-hermes) · [Install](#install) · [Connect a machine](#connect-a-machine) · [Authentication and data](#authentication-and-data)
 
@@ -64,7 +64,7 @@ Only `plugin.js` is required. This README is the installation and usage guide.
 
 ## Updates
 
-Choose **Check for updates** at the bottom of Connections. It checks the latest stable GitHub release and automatically installs a newer, verified version. Nothing is downloaded in the background. Finish any open machine setup before updating.
+Choose **Check for updates** at the bottom of Connections. It checks the latest stable GitHub release and shows the available version. Choose **Update now** to download and install that verified version, or **Later** to dismiss it. Checking only fetches release metadata; the plugin file is downloaded and replaced after confirmation. Finish any open machine setup before updating.
 
 The plugin checks a release signature against its built-in public key, then checks the downloaded file's SHA-256 hash and size before replacing anything. Downloads come from this repository at the exact commit named in the signed release. Unsigned releases, altered files, and automatic downgrades are rejected. This verifies the publisher and file integrity; it does not guarantee that a release has no bugs.
 

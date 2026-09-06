@@ -3,12 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { jsx, jsxs } from "react/jsx-runtime";
 
 const ID = "hermes-ssh";
-const VERSION = "0.3.1";
+const VERSION = "0.3.2";
 // Public verification key only. The release signing key never ships to users.
 const UPDATE_KEY = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEdDcg2pf4qQg4y89ZLfoIhfJqyKP+bJMA0Q0YVDK0VAbAgyVi5CaodDuUgibOqTx1zQg9xrXdzYbCvpgMjIFBCw==";
 const UPDATE_REPO = "Adolanium/hermes-ssh";
 const UPDATE_LIMIT = 500_000;
-const updateState = sdk.atom({ busy: false, message: "", error: "", backup: null });
+const updateState = sdk.atom({ busy: false, message: "", error: "", backup: null, available: null });
 const UPDATE_LOCK = Symbol.for("hermes-ssh.update-lock");
 
 function updatePatch(value) {
@@ -143,10 +143,16 @@ async function replacePlugin(desktop, dir, before, next, storage) {
   }
   return backup;
 }
-async function runUpdate(restore = false) {
+function dismissUpdate() {
+  if (!updateState.get().busy) updatePatch({ available: null, message: "", error: "" });
+}
+async function runUpdate(action = "check") {
   if (globalThis[UPDATE_LOCK] || state.get().busy || state.get().panel) return;
+  if (!["check", "install", "restore"].includes(action)) return;
+  const offered = updateState.get().available;
+  if (action === "install" && !offered) return;
   globalThis[UPDATE_LOCK] = true;
-  updatePatch({ busy: true, error: "", message: restore ? "Restoring the previous version…" : "Checking for updates…" });
+  updatePatch({ busy: true, error: "", available: null, message: action === "restore" ? "Restoring the previous version…" : action === "install" ? "Verifying the selected update…" : "Checking for updates…" });
   try {
     const desktop = updateDesktop();
     const dir = await updateLocation(desktop);
@@ -156,26 +162,36 @@ async function runUpdate(restore = false) {
     if (!before.includes(`const VERSION = "${VERSION}";`) || !before.includes(`const UPDATE_KEY = "${UPDATE_KEY}";`))
       throw new Error("This isn't the loaded plugin's installation. Install it under hermes-ssh/plugin.js and reload Desktop.");
     let next, message;
-    if (restore) {
+    if (action === "restore") {
       const backup = await storage.get(backupKey(dir), null);
       if (!validBackup(backup)) throw new Error("No previous version is available.");
       next = await readUpdateFile(desktop, dir + "/" + backup.name);
       if (await digest(next) !== backup.sha256) throw new Error("The backup has changed. It was not restored.");
       message = "Previous version restored. Reload desktop plugins if the page hasn't refreshed.";
     } else {
-      let release;
-      try {
-        release = JSON.parse(await fetchUpdateText(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, 100_000));
-      } catch (error) {
-        if (error.status !== 404) throw error;
-        updatePatch({ message: `No update is published yet. You're still on v${VERSION}.` });
-        return;
+      let release = offered?.release;
+      if (action === "check") {
+        try {
+          release = JSON.parse(await fetchUpdateText(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, 100_000));
+        } catch (error) {
+          if (error.status !== 404) throw error;
+          updatePatch({ message: `No update is published yet. You're still on v${VERSION}.` });
+          return;
+        }
       }
       const info = await verifyRelease(release);
       if (!newerVersion(info.version, VERSION)) {
         updatePatch({ message: `You're up to date. Hermes SSH v${VERSION}.` });
         return;
       }
+      if (action === "check") {
+        updatePatch({ available: { release, version: info.version, dir, sha256: await digest(before) },
+          message: `Hermes SSH v${info.version} is available. Would you like to update?` });
+        return;
+      }
+      // Consent is for this signed release and this installation, never a later release.
+      if (offered.dir !== dir || offered.sha256 !== await digest(before))
+        throw new Error("The Desktop profile or installed plugin changed. Check for updates again.");
       updatePatch({ message: `Downloading v${info.version}…` });
       next = await fetchUpdateText(`https://raw.githubusercontent.com/${UPDATE_REPO}/${info.commit}/plugin.js`, UPDATE_LIMIT);
       if (new TextEncoder().encode(next).length !== info.bytes || await digest(next) !== info.sha256 ||
@@ -1376,7 +1392,7 @@ function UpdateControls({ disabled = false }) {
           jsxs("div", {
             children: [
               jsx("strong", { children: `Hermes SSH v${VERSION}` }),
-              jsx("p", { children: disabled ? "Finish machine setup before updating." : "Checks GitHub and installs a verified update when available." }),
+              jsx("p", { children: disabled ? "Finish machine setup before updating." : "Check for a new version. You choose when to install it." }),
             ],
           }),
           jsx(Button, {
@@ -1391,9 +1407,20 @@ function UpdateControls({ disabled = false }) {
         role: update.error ? "alert" : "status",
         children: update.error || update.message,
       }),
+      update.available && jsxs("div", {
+        className: "hssh-key-actions",
+        role: "group",
+        "aria-label": `Install Hermes SSH v${update.available.version}?`,
+        children: [
+          jsx(Button, { variant: "primary", disabled: disabled || update.busy,
+            onClick: () => runUpdate("install"), children: "Update now" }),
+          jsx(Button, { variant: "quiet", disabled: update.busy,
+            onClick: dismissUpdate, children: "Later" }),
+        ],
+      }),
       update.backup && jsx(Button, {
         variant: "quiet", disabled: disabled || update.busy,
-        onClick: () => runUpdate(true), children: "Restore previous version",
+        onClick: () => runUpdate("restore"), children: "Restore previous version",
       }),
     ],
   });
@@ -1481,6 +1508,7 @@ export const __test = {
   fetchUpdateText,
   replacePlugin,
   runUpdate,
+  dismissUpdate,
   UpdateControls,
   quote,
   validateMachine,
