@@ -14,6 +14,8 @@ Save your Raspberry Pi, development server, or build machine in Hermes Desktop. 
 
 [What it does](#your-machines-inside-hermes) · [Install](#install) · [Connect a machine](#connect-a-machine) · [Authentication and data](#authentication-and-data)
 
+https://github.com/user-attachments/assets/292680af-0158-4f94-b1bd-9d5b35d01728
+
 </div>
 
 ## Your machines, inside Hermes
