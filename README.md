@@ -183,12 +183,11 @@ The repository contains the complete plugin source in `plugin.js` and this guide
 
 The `catalog/` directory packages this Desktop plugin for the Hermes plugin catalog,
 using the [combined package layout](https://hermes-agent.nousresearch.com/docs/developer-guide/desktop-plugin-sdk#one-package-both-sdks).
-Catalog admission is pending. The repository does not imply approval or endorsement.
-
-To install the package directly before catalog admission:
+hermes-ssh is [listed in the Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins/hermes-ssh)
+as a community plugin. The catalog installs the commit it reviewed and pinned:
 
 ```sh
-hermes plugins install Adolanium/hermes-ssh/catalog
+hermes plugins install hermes-ssh
 ```
 
 Restart Hermes Desktop or rescan plugins, then enable the Desktop component in
@@ -201,8 +200,8 @@ installation per Desktop plugin. Before switching from a manual install, back up
 and move its folder out of the Desktop plugin directory; Hermes intentionally
 does not overwrite manual installations. Keep plugin settings when migrating.
 
-After catalog admission, use `hermes plugins update hermes-ssh` and rescan
-Desktop plugins to adopt a reviewed update. The packaged copy has no in-app update or restore controls. Its release downloader, signature verifier, backup/restore updater, and code-replacement helpers are removed at build time. Standalone signed updates
+Run `hermes plugins update hermes-ssh` and rescan Desktop plugins to adopt a
+reviewed update. The packaged copy has no in-app update or restore controls. Its release downloader, signature verifier, backup/restore updater, and code-replacement helpers are removed at build time. Standalone signed updates
 continue to use the existing root files.
 
 For development, edit the root files, then run `python scripts/build_catalog.py`.
